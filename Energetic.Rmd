@@ -1,0 +1,568 @@
+---
+title: "R Notebook"
+output: PDF
+---
+# Library
+
+```{r, message = FALSE}
+library(fda)
+library(gmfd)
+library(doSNOW)
+library(pracma) 
+library(foreach)
+library(fda.usc)
+library(ggplot2)
+library(gStream)
+library(reshape2)
+library(doParallel)
+```
+
+# Simulate functional data
+
+```{r}
+t_values <- seq(0, 1, length.out = 1000)
+N <- 200    # 這是要模擬的功能實現的數量
+L <- 150    # 基擴展中的項數
+sim1 <- function(rho = 0.2, mean_change=TRUE, scale, cov_change=FALSE){
+  
+  phi <- function(l, t) {
+    if (l == 0) {
+      return(1)
+    } else if (l %% 2 == 1) {
+      k <- (l + 1) / 2
+      return(sqrt(2) * sin(2 * pi * k * t - pi))
+    } else {
+      k <- l / 2
+      return(sqrt(2) * cos(2 * pi * k * t - pi))
+    }
+  }
+  
+  # plot(t_values, phi(1, t_values), type = "l", xlab = "t", ylab = "phi(150, t)")
+  # for(i in 2:20) {
+  #   lines(t_values, phi(i, t_values), col = "red")
+  # }
+  
+  lambda <- function(l) {
+    return(0.7 * 2^(-l))
+  }
+  generate_tau <- function(N, L, rho, scale, cov_change) {
+    tau <- matrix(0, N, L + 1)
+    for (i in 1:N) {
+      for (l in 1:(L + 1)) {
+        if (i == 1) {
+          tau[i,l] <- rnorm(1)
+        }
+        else if (i <= 150){ # 3/4 * N
+          tau[i,l] <- rho * tau[i - 1, l] + rnorm(1)
+        }
+        else{
+          tau[i,l] <- rho * tau[i - 1, l] + scale * ifelse(cov_change, rexp(1), rnorm(1))
+        }
+      }
+    }
+    return(tau)
+  }
+  
+  mean_function <- function(t, i, N) {
+    if(mean_change == TRUE){
+      if (i <= 150) { # 3/4 * N
+        return(0.5 - 100 * (t - 0.1) * (t - 0.3) * (t - 0.5) * (t - 0.9) + 0.8 * sin(1+10*pi*t))
+      } else{
+        return(1 + 3*t^2 - 5*t^3)
+      }
+    }
+    else{
+      return(0.5 - 100 * (t - 0.1) * (t - 0.3) * (t - 0.5) * (t - 0.9) + 0.8 * sin(1+10*pi*t))
+    }
+  }
+  # scale_function <- function(t, i, N) {
+  #   if (i <= 3/4 * N) {
+  #     return(t)
+  #   } else {
+  #     return(2*t)
+  #   }
+  # }
+  simulate_Y <- function(N, L, rho, t_values) {
+    Phi <- sapply(0:L, function(l) sapply(t_values, function(t) phi(l, t)))
+    Lambda <- diag(sapply(0:L, function(l) sqrt(lambda(l))))
+    Tau_scaled <- generate_tau(N, L, rho, scale, cov_change) %*% t(Lambda)
+    MeanVals <- matrix(nrow = N, ncol = length(t_values))
+    for (i in 1:N) {
+      for (t_index in 1:length(t_values)) {
+        MeanVals[i, t_index] <- mean_function(t_values[t_index], i, N)
+      }
+    }
+    Y <- MeanVals + Tau_scaled %*% t(Phi)
+    return(Y)
+    
+    # tau <- generate_tau(N, L, rho, scale)
+    # Y <- matrix(0, N, length(t_values))
+    # for (i in 1:N) {
+    #   for (t_index in 1:length(t_values)) {
+    #     t <- t_values[t_index]
+    #     sum_val <- mean_function(t, i, N)
+    #     for (l in 0:L) {
+    #       sum_val <- sum_val + sqrt(lambda (l)) * tau[i,l + 1] * phi(l, t)
+    #     }
+    #     Y[i, t_index] <- sum_val
+    #   }
+    # }
+    # return(Y)
+  }
+  Y_simulated <- simulate_Y(N, L, rho, t_values)
+  
+  #1. L2 distance
+  # integral_distance <- function(vec1, vec2) {
+  #   f <- function(x) {
+  #     # 插值找到當前x值下vec1和vec2的值
+  #     y1 <- approx(1:length(vec1), vec1, x)$y
+  #     y2 <- approx(1:length(vec2), vec2, x)$y
+  #     (y1 - y2)^2
+  #   }
+  #   integral <- integrate(f, lower = 1, upper = length(vec1))
+  #   sqrt(integral$value)
+  # }
+
+  #2. with derivative information
+  # integral_distance <- function(vec1, vec2, t = t_values) {
+  #   diff_square <- (vec1 - vec2)^2
+  # 
+  #   # 計算導數
+  #   d_vec1 <- diff(vec1) / diff(t)
+  #   d_vec2 <- diff(vec2) / diff(t)
+  #   # 因為diff()會減少一個長度，所以需要對時間t作相同的處理
+  #   t_diff <- t[-length(t)]
+  # 
+  #   # 計算導數的差值平方
+  #   diff_deriv_square <- (d_vec1 - d_vec2)^2
+  # 
+  #   integral1 <- trapz(t, diff_square)
+  #   integral2 <- trapz(t_diff, diff_deriv_square)
+  # 
+  #   # 平方根
+  #   sqrt(integral1 + integral2)
+  # }
+  
+  #3. General Mahalanobis distance
+  # integral_distance <- function(FD1, i, j, t = t_values, eigval, eigfunc) {
+  #   x <- gmfd::funData( t, FD1$data[[1]][i, ] )
+  #   y <- gmfd::funData( t, FD1$data[[1]][j, ] )
+  #   gmfd::funDist( x, y, metric = "mahalanobis", p = 10^5, eigval, eigfunc )
+  # }
+
+  # no_cores <- detectCores(logical = FALSE)
+  # cl <- makeCluster(no_cores)
+  # registerDoParallel(cl)
+  # n = 100
+  # 
+  # distance_matrix <- foreach(i = 1:n, .combine='cbind', .export = "t_values", .packages = 'pracma') %dopar% {
+  #   column_i <- numeric(n)
+  #   for (j in 1:n) {
+  #     column_i[j] <- integral_distance(Y_simulated[i, ], Y_simulated[j, ], t_values)
+  #   }
+  #   column_i
+  # }
+  # 
+  # stopCluster(cl)
+  # distance_matrix <- t(distance_matrix)
+  # diag(distance_matrix) = max(distance_matrix)+100
+  
+  # list(Y_simulated=Y_simulated, distance_matrix=distance_matrix)
+  return(Y_simulated)
+}
+# Graph
+start = Sys.time()
+Y_simulated = sim1(rho=0.2, mean_change=TRUE, scale=2, cov_change=FALSE)
+
+par(mar = c(3, 3, 2, 2))
+plot(t_values, Y_simulated[1,], type = "l", ylim = c(min(Y_simulated), max(Y_simulated)), xlab = "t", ylab = "Y(t)")
+for (i in 2:150) {
+  lines(t_values, Y_simulated[i,], col = "black")
+}
+for (i in 151:N) {
+  lines(t_values, Y_simulated[i,], col = "red")
+}
+legend("topleft", legend = c("Before", "After"), col = c("black", "red"), lwd = 2, lty = 1, bty = "n")
+
+end = Sys.time()
+print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+```
+
+# Settings
+
+```{r}
+dist2 <- function(vec1, vec2, t = t_values) {
+  diff_square <- (vec1 - vec2)^2
+  d_vec1 <- diff(vec1) / diff(t)
+  d_vec2 <- diff(vec2) / diff(t)
+  t_diff <- t[-length(t)]
+  diff_deriv_square <- (d_vec1 - d_vec2)^2
+  integral1 <- trapz(t, diff_square)
+  integral2 <- trapz(t_diff, diff_deriv_square)
+  sqrt(integral1 + integral2)
+}
+
+cal_L1 <- function(Z, n1, n2, t) {
+  B_indices <- 1:n1
+  C_indices <- (n1 + t):(n1 + t + n2 - 1)
+  dist_mat <- as.matrix(dist(Z))
+  mu_BC <- mean(dist_mat[B_indices, C_indices])
+  mu_BB <- mean(dist_mat[B_indices, B_indices][lower.tri(dist_mat[B_indices, B_indices])])
+  mu_CC <- mean(dist_mat[C_indices, C_indices][lower.tri(dist_mat[C_indices, C_indices])])
+  L_1 <- 2 * mu_BC - mu_BB - mu_CC
+  return(L_1)
+}
+
+Lt_iter <- function(L_last, Z, n1, n2, t) {
+  last_c <- Z[n1 + t + n2 - 1, ]
+  first_c <- Z[n1 + t - 1, ]
+  term1 <- sum(vapply(1:n1, function(i) dist2(Z[i, ], last_c) - dist2(Z[i, ], first_c), numeric(1))) / (n1 + n2)
+  indices <- (n1 + t):(n1 + t + n2 - 2)
+  term2 <- sum(vapply(indices, function(i) dist2(Z[i, ], last_c) - dist2(Z[i, ], first_c), numeric(1))) / choose(n2, 2)
+  L_t <- L_last + term1 + term2
+  return(L_t)
+}
+
+# Training for the threshold h
+train_threshold <- function(RL, training_samples, R, n1, n2, alpha) {
+  h_values <- rep(0, R)
+  n_rows <- nrow(training_samples)
+  for (r in 1:R) {
+    indices <- sample(n_rows)
+    Z <- training_samples[indices, ]
+    L_value <- cal_L1(Z, n1, n2, 1)
+    max_L <- L_value
+    for (t in 2:(RL - n2 + 1)) { # RL - n2 + 1 is the last possible window start
+      L_value <- Lt_iter(L_value, Z, n1, n2, t)
+      if (L_value > max_L) {
+        max_L <- L_value
+      }
+    }
+    h_values[r] <- max_L
+  }
+  h <- quantile(h_values, 1 - alpha)
+  return(h)
+}
+
+##############################################################
+
+# Sliding-Window Algorithm
+sliding_window_algorithm <- function(Z, n1, n2, h) {
+  # s <- 1
+  tau <- c()
+  t <- 1
+  L_value <- cal_L1(Z, n1, n2, t)
+  L_list <- c(L_value)
+  repeat {
+    t <- t + 1
+    if (n1 + t + n2 - 1 > dim(Z)[1]){
+      tau <- c(tau, 0)
+      break
+    }  # Ensure we don't go out of bounds
+    L_value <- Lt_iter(L_value, Z, n1, n2, t)
+    L_list <- c(L_list, L_value)
+    if (L_value > h) {
+      tau <- c(tau, n1 + t)
+      # tau[s + 1] <- tau[s] + n1 + t
+      # s <- s + 1
+      # Discard observations before Z[n1 + t + n2]
+      # Z <- Z[(n1 + t + n2):length(Z)]
+      # Reset t and break to restart with the new window
+      # t <- 0
+      break
+    }
+  }
+  return(list(tau = tau, L_list = L_list))
+}
+
+sliding_window_algorithm <- function(Z, n1, n2, h) {
+  max_t <- dim(Z)[1] - n1 - n2 + 1
+  L_list <- numeric(max_t) 
+  tau <- numeric(1)
+  t <- 1
+  L_value <- cal_L1(Z, n1, n2, t)
+  L_list[1] <- L_value
+  while(t < max_t) {
+    t <- t + 1
+    L_value <- Lt_iter(L_value, Z, n1, n2, t)
+    L_list[t] <- L_value
+    if (L_value > h) {
+      tau[1] <- n1 + t
+      break
+    }
+  }
+  L_list <- L_list[1:t]
+  return(list(tau = tau, L_list = L_list))
+}
+
+##############################################################
+
+# h_values <- seq(50, 150, by = 10)
+R = 50; h = 100 # more runs
+find_h <- function(samples, n1, n2, h, R, arl) { # use historical data to find h
+  numCores <- detectCores(logical = FALSE)
+  cl <- makeCluster(numCores)
+  registerDoParallel(cl)
+  while (TRUE) {
+    runlen = 0
+    runlen <- foreach(r = 1:R, .combine = '+', .export = c("sliding_window_algorithm","cal_L1","Lt_iter","dist2","t_values"), .packages = c("pracma")) %dopar% {
+      indices <- sample(1:75, arl+100, replace = TRUE)
+      Z <- samples[indices, ]
+      result <- sliding_window_algorithm(Z, n1, n2, h)
+      if (result$tau[1] == 0) {
+        arl+100
+      }
+      else{
+        result$tau[1]
+      }
+    }
+    dif = runlen/R - arl
+    if (dif > 20 && dif <= 50){
+      break
+    } else if (dif > 50){
+      h = h - 10
+    } else{
+      h = h + 10
+    }
+  }
+  stopCluster(cl)
+  return(h)
+}
+
+# h = 100
+# numCores <- detectCores(logical = FALSE)
+# cl <- makeCluster(numCores)
+# registerDoParallel(cl)
+# while (TRUE) {
+#   runlen = 0
+#   runlen <- foreach(r = 1:R, .combine = '+') %dopar% {
+#     print(paste0("Run: ", r))
+#     indices <- sample(1:nrow(Y_simulated), 550, replace = TRUE)
+#     Z <- Y_simulated[indices, ]
+#     result <- sliding_window_algorithm(Z, n1, n2, h)
+#     if (result$tau[1] == 0) {
+#       500
+#     }
+#     else{
+#       result$tau[1]
+#     }
+#   }
+#   dif = abs(runlen / R - 500)
+#   if (dif <= 10){
+#     print(runlen / R)
+#     break
+#   } else if (runlen / R > 500){
+#     h = h - 10
+#   } else{
+#     h = h + 10
+#   }
+# }
+# stopCluster(cl)
+# sliding_window_algorithm(Y_simulated, n1, n2, 19)$tau
+
+##############################################################
+
+performance <- function(result){
+  cp <- readRDS(result)
+  print(paste0("Successful detection count: ", length(cp[which(cp>=150)])))
+  print(paste0("Average delay: ",round(mean(cp[which(cp>=150)]-150),3)))
+  print(paste0("Undetected change count: ", length(cp[which(cp==0)])))
+  par(mar = c(3, 3, 2, 2))
+  hist(cp, main = "Histogram of Change Points", xlab = "Change point", ylab = "Frequency", breaks = 50)
+  abline(v = 150, col = "red", lwd = 2)
+}
+
+##############################################################
+
+start.time <- Sys.time()
+N = 200
+Y_simulated = sim1(rho=0.2, mean_change=FALSE, scale=2, cov_change=FALSE)
+# cal_L1(Y_simulated, n1, n2, 1) # 0.3287079
+# Lt_iter(5, Y_simulated, n1, n2, 2) # 0.07347488
+n1 = 75
+n2 = 10
+h = 100; R = 50
+# alpha = 0.1
+# run = 10
+# RL = 500
+# h <- train_threshold(RL, Y_simulated, run, n1, n2, alpha) # 128.0328
+thres = find_h(Y_simulated, n1, n2, h, R, 500)
+sliding_window_algorithm(Y_simulated, n1, n2, thres)$tau
+end.time <- Sys.time()
+print(end.time - start.time) # 21.49712 mins 50
+```
+
+# Mean change
+
+```{r}
+N <- 200; n1 = 75; n2 = 10; ini_h = 100; R = 20
+start.time <- Sys.time()
+# count = 0; cp <- c(); h_results <- c()
+# for(i in 1:100){
+#   print(paste0("Run: ", i))
+#   Y_simulated = sim1(rho=0.2, mean_change=TRUE, scale=1, cov_change=FALSE)$Y_simulated
+#   # h <- train_threshold(RL, Y_simulated, run, n1, n2, alpha)
+#   # h_values <- seq(50, 150, by = 10)
+#   # h <- find_h(h_values, Y_simulated, n1, n2, R)
+#   h <- find_h(Y_simulated, n1, n2, ini_h, R, 500)
+#   print(h)
+#   h_results <- c(h_results, h)
+#   change_points <- sliding_window_algorithm(Y_simulated, n1, n2, h)$tau
+#   cp <- c(cp, change_points)
+#   print(sliding_window_algorithm(Y_simulated, n1, n2, h)$L_list)
+#   if(change_points >= 150){
+#     count = count + 1
+#   }
+# }
+# print(count) # 
+
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results <- foreach(i = 1:100, .combine = rbind, .packages = c("doParallel")) %dopar% {
+  print(paste0("Run: ", i))
+  Y_simulated <- sim1(rho = 0.2, mean_change = TRUE, scale = 1, cov_change = FALSE)$Y_simulated
+  h <- find_h(Y_simulated, n1, n2, ini_h, R, 500)
+  # print(h)
+  change_points <- sliding_window_algorithm(Y_simulated, n1, n2, h)$tau
+  # L_list <- sliding_window_algorithm(Y_simulated, n1, n2, h)$L_list
+  # print(L_list)
+  count_inc <- ifelse(change_points >= 150, 1, 0)
+  list(h = h, change_points = change_points, count_inc = count_inc) # L_list = L_list
+}
+stopCluster(cl)
+
+# h_results <- unlist(results[, 1])
+# cp <- unlist(results[, 2])
+# print(paste0("Successful detection count: ", sum(unlist(results[, 3]))))
+
+cp <- sapply(results, function(x) x$cp)
+print(sum(sapply(results, function(x) x$count)))
+
+# saveRDS(h_results, "energetic_mean_change_h_500arl_cp150.rds")
+saveRDS(cp, "energetic_mean_change_500arl_cp150.rds")
+end.time <- Sys.time()
+print(end.time - start.time)
+
+# results
+# h_results <- readRDS("energetic_mean_change_h_500arl.rds") # 5 hr
+# cp <- readRDS("energetic_mean_change_500arl.rds")
+# print(paste0("Successful detection count: ", length(cp[which(cp >= 75 & cp <= 90)])))
+# print(paste0("Average delay: ", mean(cp[which(cp >= 75)]-75)))
+
+# h_results <- readRDS("energetic_mean_change_h_500arl_cp150.rds") # 5 hours
+performance("energetic_mean_change_500arl_cp150.rds")
+```
+
+# Scale change
+
+```{r}
+N <- 200; n1 = 75; n2 = 10; ini_h = 100; R = 20
+start.time <- Sys.time()
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results <- foreach(i = 1:100, .combine = rbind, .packages = c("doParallel")) %dopar% {
+  print(paste0("Run: ", i))
+  Y_simulated <- sim1(rho = 0.2, mean_change = FALSE, scale = 2, cov_change = FALSE)$Y_simulated
+  h <- find_h(Y_simulated, n1, n2, ini_h, R, 500)
+  # print(h)
+  change_points <- sliding_window_algorithm(Y_simulated, n1, n2, h)$tau
+  # L_list <- sliding_window_algorithm(Y_simulated, n1, n2, h)$L_list
+  # print(L_list)
+  count_inc <- ifelse(change_points >= 150, 1, 0)
+  list(h = h, change_points = change_points, count_inc = count_inc) # L_list = L_list
+}
+stopCluster(cl)
+
+h_results <- unlist(results[, 1])
+cp <- unlist(results[, 2])
+print(paste0("Successful detection count: ", sum(unlist(results[, 3]))))
+saveRDS(h_results, "energetic_scale_change_h_500arl_cp150.rds")
+saveRDS(cp, "energetic_scale_change_500arl_cp150.rds")
+end.time <- Sys.time()
+print(end.time - start.time)
+
+# results
+# h_results <- readRDS("energetic_scale_change_h_500arl.rds") # 11 hr
+# cp <- readRDS("energetic_scale_change_500arl.rds")
+# print(paste0("Successful detection count: ", length(cp[which(cp >= 75 & cp <= 90)])))
+# print(paste0("Average delay: ", mean(cp[which(cp >= 75)]-75)))
+
+h_results <- readRDS("energetic_scale_change_h_500arl_cp150.rds") # 3.80523 hours
+performance("energetic_scale_change_500arl_cp150.rds")
+```
+
+# Mean + Scale change
+
+```{r}
+N <- 200; n1 = 75; n2 = 10; ini_h = 100; R = 20
+start.time <- Sys.time()
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results <- foreach(i = 1:100, .combine = rbind, .packages = c("doParallel")) %dopar% {
+  print(paste0("Run: ", i))
+  Y_simulated <- sim1(rho = 0.2, mean_change = TRUE, scale = 2, cov_change = FALSE)$Y_simulated
+  h <- find_h(Y_simulated, n1, n2, ini_h, R, 500)
+  # print(h)
+  change_points <- sliding_window_algorithm(Y_simulated, n1, n2, h)$tau
+  # L_list <- sliding_window_algorithm(Y_simulated, n1, n2, h)$L_list
+  # print(L_list)
+  count_inc <- ifelse(change_points >= 150, 1, 0)
+  list(h = h, change_points = change_points, count_inc = count_inc) # L_list = L_list
+}
+stopCluster(cl)
+
+h_results <- unlist(results[, 1])
+cp <- unlist(results[, 2])
+print(paste0("Successful detection count: ", sum(unlist(results[, 3]))))
+saveRDS(h_results, "energetic_mean_scale_change_h_500arl_cp150.rds")
+saveRDS(cp, "energetic_mean_scale_change_500arl_cp150.rds")
+end.time <- Sys.time()
+print(end.time - start.time)
+
+# results
+# h_results <- readRDS("energetic_mean_scale_change_h_500arl.rds") # 10 hr
+# cp <- readRDS("energetic_mean_scale_change_500arl.rds")
+# print(paste0("Successful detection count: ", length(cp[which(cp >= 75 & cp <= 90)])))
+# print(paste0("Average delay: ", mean(cp[which(cp >= 75)]-75)))
+
+h_results <- readRDS("energetic_mean_scale_change_h_500arl_cp150.rds") # 8 hours
+performance("energetic_mean_scale_change_500arl_cp150.rds")
+```
+
+# Covariance structure change
+
+```{r}
+N <- 200; n1 = 75; n2 = 10; ini_h = 100; R = 20
+start.time <- Sys.time()
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results <- foreach(i = 1:100, .combine = rbind, .packages = c("doParallel")) %dopar% {
+  print(paste0("Run: ", i))
+  Y_simulated <- sim1(rho = 0.2, mean_change = FALSE, scale = 1, cov_change = TRUE)$Y_simulated
+  h <- find_h(Y_simulated, n1, n2, ini_h, R, 500)
+  # print(h)
+  change_points <- sliding_window_algorithm(Y_simulated, n1, n2, h)$tau
+  # L_list <- sliding_window_algorithm(Y_simulated, n1, n2, h)$L_list
+  # print(L_list)
+  count_inc <- ifelse(change_points >= 150, 1, 0)
+  list(h = h, change_points = change_points, count_inc = count_inc) # L_list = L_list
+}
+stopCluster(cl)
+
+h_results <- unlist(results[, 1])
+cp <- unlist(results[, 2])
+print(paste0("Successful detection count: ", sum(unlist(results[, 3]))))
+saveRDS(h_results, "energetic_cov_change_h_500arl_cp150.rds")
+saveRDS(cp, "energetic_cov_change_500arl_cp150.rds")
+end.time <- Sys.time()
+print(end.time - start.time)
+
+# results
+# h_results <- readRDS("energetic_cov_change_h_500arl.rds") # 5 hr
+# cp <- readRDS("energetic_cov_change_500arl.rds")
+# print(paste0("Successful detection count: ", length(cp[which(cp >= 75 & cp <= 90)])))
+# print(paste0("Average delay: ", mean(cp[which(cp >= 75)]-75)))
+
+h_results <- readRDS("energetic_cov_change_h_500arl_cp150.rds") # 8 hours
+performance("energetic_cov_change_500arl_cp150.rds")
+```
