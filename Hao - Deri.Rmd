@@ -1,0 +1,468 @@
+---
+title: "R Notebook"
+output: PDF
+---
+# Library
+
+```{r, message = FALSE}
+library(fda)
+library(gmfd)
+library(doSNOW)
+library(pracma) 
+library(foreach)
+library(fda.usc)
+library(ggplot2)
+library(gStream)
+library(reshape2)
+library(doParallel)
+```
+
+# Simulate functional data
+
+```{r}
+t_values <- seq(0, 1, length.out = 1000)
+N <- 150    # 這是要模擬的功能實現的數量
+L <- 150    # 基擴展中的項數
+sim1 <- function(rho = 0.2, mean_change=TRUE, scale, cov_change=FALSE){
+  
+  phi <- function(l, t) {
+    if (l == 0) {
+      return(1)
+    } else if (l %% 2 == 1) {
+      k <- (l + 1) / 2
+      return(sqrt(2) * sin(2 * pi * k * t - pi))
+    } else {
+      k <- l / 2
+      return(sqrt(2) * cos(2 * pi * k * t - pi))
+    }
+  }
+  
+  # plot(t_values, phi(1, t_values), type = "l", xlab = "t", ylab = "phi(150, t)")
+  # for(i in 2:20) {
+  #   lines(t_values, phi(i, t_values), col = "red")
+  # }
+  
+  lambda <- function(l) {
+    return(0.7 * 2^(-l))
+  }
+  generate_tau <- function(N, L, rho, scale, cov_change) {
+    tau <- matrix(0, N, L + 1)
+    for (i in 1:N) {
+      for (l in 1:(L + 1)) {
+        if (i == 1) {
+          tau[i,l] <- rnorm(1)
+        }
+        else if (i <= 100){
+          tau[i,l] <- rho * tau[i - 1, l] + rnorm(1)
+        }
+        else{
+          tau[i,l] <- rho * tau[i - 1, l] + scale * ifelse(cov_change, rexp(1), rnorm(1))
+        }
+      }
+    }
+    return(tau)
+  }
+  
+  mean_function <- function(t, i, N) {
+    if(mean_change == TRUE){
+      if (i <= 100) {
+        return(0.5 - 100 * (t - 0.1) * (t - 0.3) * (t - 0.5) * (t - 0.9) + 0.8 * sin(1+10*pi*t))
+      } else{
+        return(1 + 3*t^2 - 5*t^3)
+      }
+    }
+    else{
+      return(0.5 - 100 * (t - 0.1) * (t - 0.3) * (t - 0.5) * (t - 0.9) + 0.8 * sin(1+10*pi*t))
+    }
+  }
+  # scale_function <- function(t, i, N) {
+  #   if (i <= 3/4 * N) {
+  #     return(t)
+  #   } else {
+  #     return(2*t)
+  #   }
+  # }
+  simulate_Y <- function(N, L, rho, t_values) {
+    Phi <- sapply(0:L, function(l) sapply(t_values, function(t) phi(l, t)))
+    Lambda <- diag(sapply(0:L, function(l) sqrt(lambda(l))))
+    Tau_scaled <- generate_tau(N, L, rho, scale, cov_change) %*% t(Lambda)
+    MeanVals <- matrix(nrow = N, ncol = length(t_values))
+    for (i in 1:N) {
+      for (t_index in 1:length(t_values)) {
+        MeanVals[i, t_index] <- mean_function(t_values[t_index], i, N)
+      }
+    }
+    Y <- MeanVals + Tau_scaled %*% t(Phi)
+    return(Y)
+    
+    # tau <- generate_tau(N, L, rho, scale)
+    # Y <- matrix(0, N, length(t_values))
+    # for (i in 1:N) {
+    #   for (t_index in 1:length(t_values)) {
+    #     t <- t_values[t_index]
+    #     sum_val <- mean_function(t, i, N)
+    #     for (l in 0:L) {
+    #       sum_val <- sum_val + sqrt(lambda (l)) * tau[i,l + 1] * phi(l, t)
+    #     }
+    #     Y[i, t_index] <- sum_val
+    #   }
+    # }
+    # return(Y)
+  }
+  Y_simulated <- simulate_Y(N, L, rho, t_values)
+  
+  #1. L2 distance
+  # integral_distance <- function(vec1, vec2) {
+  #   f <- function(x) {
+  #     # 插值找到當前x值下vec1和vec2的值
+  #     y1 <- approx(1:length(vec1), vec1, x)$y
+  #     y2 <- approx(1:length(vec2), vec2, x)$y
+  #     (y1 - y2)^2
+  #   }
+  #   integral <- integrate(f, lower = 1, upper = length(vec1))
+  #   sqrt(integral$value)
+  # }
+
+  #2. with derivative information
+  integral_distance <- function(vec1, vec2, t = t_values) {
+    diff_square <- (vec1 - vec2)^2
+
+    # 計算導數
+    d_vec1 <- diff(vec1) / diff(t)
+    d_vec2 <- diff(vec2) / diff(t)
+    # 因為diff()會減少一個長度，所以需要對時間t作相同的處理
+    t_diff <- t[-length(t)]
+
+    # 計算導數的差值平方
+    diff_deriv_square <- (d_vec1 - d_vec2)^2
+
+    integral1 <- trapz(t, diff_square)
+    integral2 <- trapz(t_diff, diff_deriv_square)
+
+    # 平方根
+    sqrt(integral1 + integral2)
+  }
+  
+  #3. General Mahalanobis distance
+  # integral_distance <- function(FD1, i, j, t = t_values, eigval, eigfunc) {
+  #   x <- gmfd::funData( t, FD1$data[[1]][i, ] )
+  #   y <- gmfd::funData( t, FD1$data[[1]][j, ] )
+  #   gmfd::funDist( x, y, metric = "mahalanobis", p = 10^5, eigval, eigfunc )
+  # }
+
+  no_cores <- detectCores(logical = FALSE)
+  cl <- makeCluster(no_cores)
+  registerDoParallel(cl)
+  n = N
+  
+  # FD1 <- funData( t_values, Y_simulated )
+  # eigval <- eigen( cov( FD1$data[[1]] ) )$values
+  # eigfunc <- eigen( cov( FD1$data[[1]] ) )$vectors
+  
+  distance_matrix <- foreach(i = 1:n, .combine='cbind', .export = "t_values", .packages = 'pracma') %dopar% {
+    column_i <- numeric(n)
+    for (j in 1:n) {
+      column_i[j] <- integral_distance(Y_simulated[i, ], Y_simulated[j, ], t_values) # 
+      # column_i[j] <- integral_distance(FD1, i, j, t_values, eigval, eigfunc)
+    }
+    column_i
+  }
+  # distance_matrix <- matrix(0, n, n)
+  # for (i in 1:n) {
+  #   for (j in 1:n) {
+  #     distance_matrix[i, j] <- integral_distance(Y_simulated[i, ], Y_simulated[j, ])
+  #   }
+  # }
+  stopCluster(cl)
+  distance_matrix <- t(distance_matrix)
+  diag(distance_matrix) = max(distance_matrix)+100
+  
+  list(Y_simulated=Y_simulated, distance_matrix=distance_matrix)
+}
+# Graph
+start = Sys.time()
+Y_simulated = sim1(rho=0.2, mean_change=FALSE, scale=1, cov_change=TRUE)$Y_simulated
+
+par(mar = c(3, 3, 2, 2))
+plot(t_values, Y_simulated[1,], type = "l", ylim = c(min(Y_simulated), max(Y_simulated)), xlab = "t", ylab = "Y(t)")
+for (i in 2:100) {
+  lines(t_values, Y_simulated[i,], col = "black")
+}
+for (i in 101:N) {
+  lines(t_values, Y_simulated[i,], col = "red")
+}
+legend("topleft", legend = c("Before", "After"), col = c("black", "red"), lwd = 2, lty = 1, bty = "n")
+
+end = Sys.time()
+print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+```
+
+# Mean change
+
+```{r}
+testing <- function(N0 = 75, L = 50, k = 3){
+  distance_matrix = sim1(rho=0.2, mean_change=TRUE, scale=1, cov_change = FALSE)$distance_matrix
+  
+  r1 = gstream(distance_matrix, L, N0, k, statistics=c("o", "w", "g"), n0=0.3*L, n1=0.7*L, ARL=1500, alpha=0.05, skew.corr=TRUE, asymp=FALSE) # no maximum type
+  
+  list(alert_z = r1$tauhat$ori + N0, location_z = r1$scanZ$ori.loc[r1$tauhat$ori], delay = r1$tauhat$ori - (100-N0), 
+       alert_zw = r1$tauhat$weighted + N0, location_zw = r1$scanZ$weighted.loc[r1$tauhat$weighted], delay_zw =  r1$tauhat$weighted - (100-N0),
+       # alert_m = r1$tauhat$max.type + N0, location_m = r1$scanZ$max.type.loc[r1$tauhat$max.type], delay_m = r1$tauhat$max.type - (100-N0),
+       alert_s = r1$tauhat$generalized + N0, location_s = r1$scanZ$generalized.loc[r1$tauhat$generalized], delay_s = r1$tauhat$generalized - (100-N0))
+}
+# cl = makeCluster(10, type="SOCK")
+# registerDoSNOW(cl)
+# results_mean <- list()
+start = Sys.time()
+# results_mean = foreach(i = 1:2) %dopar% {testing()}
+# stopCluster(cl)
+# iters = 10
+# for(i in 1:iters){
+#   print(paste0("Run: ", i))
+#   results_mean[[i]] = testing()
+# }
+# end = Sys.time()
+# print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+
+# i = 1
+# while(length(results_mean) < 100){
+#   tryCatch({
+#     print(paste0("Run: ", i))
+#     results_mean[[i]] = testing()
+#     i = i + 1
+#   }, error = function(e) {
+#     print(paste0("Error in Run: ", i))
+#   })
+# }
+
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results_temp <- foreach(i = 1:100, .combine = 'c', .packages = c("doParallel")) %dopar% {
+  testing()
+}
+stopCluster(cl)
+
+end = Sys.time()
+print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+
+results_mean <- list()
+for(i in 1:100){
+  results_mean[[i]]=results_temp[(9*i-8):(9*i)]
+}
+delays <- list(); alerts <- list(); scores <- list()
+for(i in 1:100) {
+  results <- scoring(delays,results_mean,i,scores,"location_z","delay","alert_z",alerts); delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+  results <- scoring(delays,results_mean,i,scores,"location_zw","delay_zw","alert_zw",alerts);delays <- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  # results <- scoring(delays,results_mean,i,scores,"location_m","delay_m","alert_m",alerts);delays <- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  results <- scoring(delays,results_mean,i,scores,"location_s","delay_s","alert_s",alerts); delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+}
+
+# results_df <- data.frame(matrix(unlist(cap), nrow=length(cap[[1]]), byrow=F), stringsAsFactors = FALSE)
+# names(results_df) <- names(cap)
+# results_melted <- melt(results_df)
+# 
+# ggplot(results_melted, aes(x=variable, y=value)) +
+#   geom_boxplot() +
+#   xlab("Location Type") +
+#   ylab("Values") +
+#   ggtitle("Paired Boxplot for Different Locations")
+
+# for(i in 1:100){
+#   print(results_mean[[i]][[5]])
+#   print(results_mean[[i]][[6]])
+#   print(score[["location_zw"]][[i]])
+#   print("----------------------------------")
+# }
+saveRDS(alerts, "gstream_deriv_mean_1500arl_alerts_cp100.rds")
+saveRDS(delays, "gstream_deriv_mean_1500arl_delays_cp100.rds")
+
+performance("gstream_deriv_mean_500arl_delays_cp150.rds", "gstream_deriv_mean_500arl_alerts_cp150.rds")
+performance("gstream_deriv_mean_1000arl_delays_cp150.rds", "gstream_deriv_mean_1000arl_alerts_cp150.rds")
+performance("gstream_deriv_mean_1500arl_delays_cp150.rds", "gstream_deriv_mean_1500arl_alerts_cp150.rds")
+performance("gstream_deriv_mean_500arl_delays_cp100.rds", "gstream_deriv_mean_500arl_alerts_cp100.rds")
+performance("gstream_deriv_mean_1000arl_delays_cp100.rds", "gstream_deriv_mean_1000arl_alerts_cp100.rds")
+performance("gstream_deriv_mean_1500arl_delays_cp100.rds", "gstream_deriv_mean_1500arl_alerts_cp100.rds")
+```
+
+# Scale change
+
+```{r}
+testing <- function(N0 = 75, L = 50, k = 3){
+  distance_matrix = sim1(rho=0.2, mean_change=FALSE, scale=2, cov_change = FALSE)$distance_matrix
+  
+  r1 = gstream(distance_matrix, L, N0, k, statistics=c("o", "w", "g"), n0=0.3*L, n1=0.7*L, ARL=1500, alpha=0.05, skew.corr=TRUE, asymp=FALSE) # no maximum type
+  
+  list(alert_z = r1$tauhat$ori + N0, location_z = r1$scanZ$ori.loc[r1$tauhat$ori], delay = r1$tauhat$ori - (100-N0), 
+       alert_zw = r1$tauhat$weighted + N0, location_zw = r1$scanZ$weighted.loc[r1$tauhat$weighted], delay_zw =  r1$tauhat$weighted - (100-N0),
+       # alert_m = r1$tauhat$max.type + N0, location_m = r1$scanZ$max.type.loc[r1$tauhat$max.type], delay_m = r1$tauhat$max.type - (100-N0),
+       alert_s = r1$tauhat$generalized + N0, location_s = r1$scanZ$generalized.loc[r1$tauhat$generalized], delay_s = r1$tauhat$generalized - (100-N0))
+}
+
+# results_scale <- list()
+start = Sys.time()
+
+# i = 1
+# while(length(results_scale) < 100){
+#   tryCatch({
+#     print(paste0("Run: ", i))
+#     results_scale[[i]] = testing()
+#     i = i + 1
+#   }, error = function(e) {
+#     print(paste0("Error in Run: ", i))
+#   })
+# }
+
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results_temp <- foreach(i = 1:100, .combine = 'c', .packages = c("doParallel")) %dopar% {
+  testing()
+}
+stopCluster(cl)
+
+end = Sys.time()
+print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+
+results_scale <- list()
+for(i in 1:100){
+  results_scale[[i]]=results_temp[(9*i-8):(9*i)]
+}
+delays <- list(); alerts <- list(); scores <- list()
+for(i in 1:100) {
+  results <- scoring(delays,results_scale,i,scores,"location_z","delay","alert_z",alerts);delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+  results <- scoring(delays,results_scale,i,scores,"location_zw","delay_zw","alert_zw",alerts);delays<- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  # results <- scoring(delays,results_scale,i,scores,"location_m","delay_m","alert_m",alerts);delays <- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  results <- scoring(delays,results_scale,i,scores,"location_s","delay_s","alert_s",alerts);delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+}
+
+saveRDS(alerts, "gstream_deriv_scale_1500arl_alerts_cp100.rds")
+saveRDS(delays, "gstream_deriv_scale_1500arl_delays_cp100.rds")
+
+performance("gstream_deriv_scale_500arl_delays_cp150.rds", "gstream_deriv_scale_500arl_alerts_cp150.rds")
+performance("gstream_deriv_scale_1000arl_delays_cp150.rds", "gstream_deriv_scale_1000arl_alerts_cp150.rds")
+performance("gstream_deriv_scale_1500arl_delays_cp150.rds", "gstream_deriv_scale_1500arl_alerts_cp150.rds")
+performance("gstream_deriv_scale_500arl_delays_cp100.rds", "gstream_deriv_scale_500arl_alerts_cp100.rds")
+performance("gstream_deriv_scale_1000arl_delays_cp100.rds", "gstream_deriv_scale_1000arl_alerts_cp100.rds")
+performance("gstream_deriv_scale_1500arl_delays_cp100.rds", "gstream_deriv_scale_1500arl_alerts_cp100.rds")
+```
+
+# Mean + Scale change
+
+```{r}
+testing <- function(N0 = 75, L = 50, k = 3){
+  distance_matrix = sim1(rho=0.2, mean_change=TRUE, scale=2, cov_change = FALSE)$distance_matrix
+  
+  r1 = gstream(distance_matrix, L, N0, k, statistics=c("o", "w", "g"), n0=0.3*L, n1=0.7*L, ARL=1500, alpha=0.05, skew.corr=TRUE, asymp=FALSE) # no maximum type
+  
+  list(alert_z = r1$tauhat$ori + N0, location_z = r1$scanZ$ori.loc[r1$tauhat$ori], delay = r1$tauhat$ori - (100-N0), 
+       alert_zw = r1$tauhat$weighted + N0, location_zw = r1$scanZ$weighted.loc[r1$tauhat$weighted], delay_zw =  r1$tauhat$weighted - (100-N0),
+       # alert_m = r1$tauhat$max.type + N0, location_m = r1$scanZ$max.type.loc[r1$tauhat$max.type], delay_m = r1$tauhat$max.type - (100-N0),
+       alert_s = r1$tauhat$generalized + N0, location_s = r1$scanZ$generalized.loc[r1$tauhat$generalized], delay_s = r1$tauhat$generalized - (100-N0))
+}
+
+results_mv <- list()
+start = Sys.time()
+
+# i = 1
+# while(length(results_mv) < 100){
+#   tryCatch({
+#     print(paste0("Run: ", i))
+#     results_mv[[i]] = testing()
+#     i = i + 1
+#   }, error = function(e) {
+#     print(paste0("Error in Run: ", i))
+#   })
+# }
+
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results_mv <- foreach(i = 1:100, .combine = 'c', .packages = c("doParallel")) %dopar% {
+  testing()
+}
+stopCluster(cl)
+
+end = Sys.time()
+print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+
+results_mesc <- list()
+for(i in 1:100){
+  results_mesc[[i]]=results_mv[(9*i-8):(9*i)]
+}
+delays <- list(); alerts <- list(); scores <- list()
+for(i in 1:100) {
+  results <- scoring(delays,results_mesc,i,scores,"location_z","delay","alert_z",alerts);delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+  results <- scoring(delays,results_mesc,i,scores,"location_zw","delay_zw","alert_zw",alerts);delays<- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  # results <- scoring(delays,results_mesc,i,scores,"location_m","delay_m","alert_m",alerts);delays <- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  results <- scoring(delays,results_mesc,i,scores,"location_s","delay_s","alert_s",alerts);delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+}
+
+saveRDS(alerts, "gstream_deriv_mean_scale_1500arl_alerts_cp100.rds")
+saveRDS(delays, "gstream_deriv_mean_scale_1500arl_delays_cp100.rds")
+
+performance("gstream_deriv_mean_scale_500arl_delays_cp150.rds", "gstream_deriv_mean_scale_500arl_alerts_cp150.rds")
+performance("gstream_deriv_mean_scale_1000arl_delays_cp150.rds", "gstream_deriv_mean_scale_1000arl_alerts_cp150.rds")
+performance("gstream_deriv_mean_scale_1500arl_delays_cp150.rds", "gstream_deriv_mean_scale_1500arl_alerts_cp150.rds")
+performance("gstream_deriv_mean_scale_500arl_delays_cp100.rds", "gstream_deriv_mean_scale_500arl_alerts_cp100.rds")
+performance("gstream_deriv_mean_scale_1000arl_delays_cp100.rds", "gstream_deriv_mean_scale_1000arl_alerts_cp100.rds")
+performance("gstream_deriv_mean_scale_1500arl_delays_cp100.rds", "gstream_deriv_mean_scale_1500arl_alerts_cp100.rds")
+```
+
+# Covariance structure change
+
+```{r}
+testing <- function(N0 = 75, L = 50, k = 3){
+  distance_matrix = sim1(rho=0.2, mean_change=FALSE, scale=1, cov_change = TRUE)$distance_matrix
+  
+  r1 = gstream(distance_matrix, L, N0, k, statistics=c("o", "w", "g"), n0=0.3*L, n1=0.7*L, ARL=1500, alpha=0.05, skew.corr=TRUE, asymp=FALSE) # no maximum type
+  
+  list(alert_z = r1$tauhat$ori + N0, location_z = r1$scanZ$ori.loc[r1$tauhat$ori], delay = r1$tauhat$ori - (100-N0), 
+       alert_zw = r1$tauhat$weighted + N0, location_zw = r1$scanZ$weighted.loc[r1$tauhat$weighted], delay_zw =  r1$tauhat$weighted - (100-N0),
+       # alert_m = r1$tauhat$max.type + N0, location_m = r1$scanZ$max.type.loc[r1$tauhat$max.type], delay_m = r1$tauhat$max.type - (100-N0),
+       alert_s = r1$tauhat$generalized + N0, location_s = r1$scanZ$generalized.loc[r1$tauhat$generalized], delay_s = r1$tauhat$generalized - (100-N0))
+}
+
+results_temp <- list()
+start = Sys.time()
+
+# i = 1
+# while(length(results_cov) < 100){
+#   tryCatch({
+#     print(paste0("Run: ", i))
+#     results_cov[[i]] = testing()
+#     i = i + 1
+#   }, error = function(e) {
+#     print(paste0("Error in Run: ", i))
+#   })
+# }
+
+cl <- makeCluster(detectCores(logical = FALSE)-1)
+registerDoParallel(cl)
+results_temp <- foreach(i = 1:100, .combine = 'c', .packages = c("doParallel")) %dopar% {
+  testing()
+}
+stopCluster(cl)
+
+end = Sys.time()
+print(paste0("took: ", round(as.numeric(difftime(time1 = end, time2 = start, units = "secs")), 3), " seconds"))
+
+results_cov <- list()
+for(i in 1:100){
+  results_cov[[i]]=results_temp[(9*i-8):(9*i)]
+}
+delays <- list(); alerts <- list(); scores <- list()
+for(i in 1:100) {
+  results <- scoring(delays,results_cov,i,scores,"location_z","delay","alert_z",alerts);delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+  results <- scoring(delays,results_cov,i,scores,"location_zw","delay_zw","alert_zw",alerts);delays<- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  # results <- scoring(delays,results_cov,i,scores,"location_m","delay_m","alert_m",alerts);delays <- results[[2]];scores <- results[[1]];alerts <- results[[3]]
+  results <- scoring(delays,results_cov,i,scores,"location_s","delay_s","alert_s",alerts);delays <- results[[2]]; scores <- results[[1]]; alerts <- results[[3]]
+}
+
+saveRDS(alerts, "gstream_deriv_cov_1500arl_alerts_cp100.rds")
+saveRDS(delays, "gstream_deriv_cov_1500arl_delays_cp100.rds")
+
+performance("gstream_deriv_cov_500arl_delays_cp150.rds", "gstream_deriv_cov_500arl_alerts_cp150.rds")
+performance("gstream_deriv_cov_1000arl_delays_cp150.rds", "gstream_deriv_cov_1000arl_alerts_cp150.rds")
+performance("gstream_deriv_cov_1500arl_delays_cp150.rds", "gstream_deriv_cov_1500arl_alerts_cp150.rds")
+performance("gstream_deriv_cov_500arl_delays_cp100.rds", "gstream_deriv_cov_500arl_alerts_cp100.rds")
+performance("gstream_deriv_cov_1000arl_delays_cp100.rds", "gstream_deriv_cov_1000arl_alerts_cp100.rds")
+performance("gstream_deriv_cov_1500arl_delays_cp100.rds", "gstream_deriv_cov_1500arl_alerts_cp100.rds")
+```
