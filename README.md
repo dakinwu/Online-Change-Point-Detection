@@ -1,2 +1,3 @@
 # Online-Change-Point-Detection
-此研究旨在延伸多變量的線上轉折點偵測（OCPD）方法應用於函數性數據，以有效檢測數據流中的異常現象。透過模擬實驗，評估平均運行長度和平均檢測延遲兩個指標的表現，並驗證其可靠性和效率。最終比較不同方法之效能差異，探討改進潛力，為函數性數據分析提供具價值的見解。
+此研究旨在延伸多變量的線上轉折點偵測（OCPD）方法應用於函數性數據，以有效檢測數據流中的異常現象。透過模擬實驗，評估平均運行長度和平均檢測延遲兩個指標的表現，並驗證其可靠性和效率。最終比較不同方法之效能差異，探討改進潛力，為函數性數據分析提供具價值的見解。  
+This study aims to extend the application of multivariate online changepoint detection (OCPD) methods to functional data, effectively detecting anomalies in data streams. Through simulation experiments, we evaluate the performance of two key metrics: the average run length and the average detection delay, and verify their reliability and efficiency. Finally, we compare the performance differences between various methods, explore potential improvements, and provide valuable insights for functional data analysis.
