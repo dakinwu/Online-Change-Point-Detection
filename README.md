@@ -63,7 +63,7 @@ This project aims to extend multivariate online changepoint detection (OCPD) met
 
 ---
 
-## 聯絡方式 | Contact
+## 引用 | Reference
 
-如有任何問題或合作意願，歡迎聯絡專案負責人。  
-For questions or collaboration, please contact the project maintainer.
+- 吳岱錡（2024），《Online Change Point Detection in Function Data: An Extension from Multivariate Techniques》，國立臺灣大學碩士論文  
+  https://tdr.lib.ntu.edu.tw/jspui/handle/123456789/94710
